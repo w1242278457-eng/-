@@ -1,20 +1,18 @@
 """
-MCP工具协议服务端 — Model Context Protocol实现
-遵循Anthropic MCP标准，通过JSON-RPC 2.0提供工具注册/发现/调用能力。
-支持动态工具扩展，Agent通过统一接口调用外部系统。
+MCP 工具协议服务端，提供校园客服可调用的默认工具。
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from typing import Any, Callable, Awaitable, Optional
 from datetime import datetime
+from typing import Any, Awaitable, Callable, Optional
 
 
 @dataclass
 class ToolDefinition:
-    """MCP工具定义"""
+    """工具定义。"""
+
     name: str
     description: str
     input_schema: dict[str, Any]
@@ -25,7 +23,8 @@ class ToolDefinition:
 
 @dataclass
 class ToolCallResult:
-    """工具调用结果"""
+    """工具调用结果。"""
+
     tool_name: str
     success: bool
     result: Any = None
@@ -35,27 +34,13 @@ class ToolCallResult:
 
 
 class MCPToolServer:
-    """
-    MCP工具服务端。
-
-    实现 Model Context Protocol 的核心功能：
-    1. 工具注册 (Tool Registration)
-    2. 工具发现 (Tool Discovery) - Agent可查询可用工具列表
-    3. 工具调用 (Tool Invocation) - 通过JSON-RPC 2.0协议调用
-    4. 结果返回 (Result Delivery)
-
-    遵循MCP规范：
-    - 使用JSON-RPC 2.0消息格式
-    - 支持工具的inputSchema声明
-    - 提供标准化的错误码
-    """
+    """简单的 MCP 风格工具注册与调用服务。"""
 
     def __init__(self):
         self._tools: dict[str, ToolDefinition] = {}
         self._call_log: list[ToolCallResult] = []
 
     def register_tool(self, tool: ToolDefinition) -> None:
-        """注册一个MCP工具"""
         self._tools[tool.name] = tool
 
     def register(
@@ -66,9 +51,8 @@ class MCPToolServer:
         category: str = "general",
         requires_auth: bool = False,
     ) -> Callable:
-        """工具注册装饰器"""
         def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
-            tool = ToolDefinition(
+            self._tools[name] = ToolDefinition(
                 name=name,
                 description=description,
                 input_schema=input_schema,
@@ -76,32 +60,26 @@ class MCPToolServer:
                 category=category,
                 requires_auth=requires_auth,
             )
-            self._tools[name] = tool
             return func
+
         return decorator
 
     def list_tools(self, category: Optional[str] = None) -> list[dict]:
-        """
-        工具发现：列出所有可用工具。
-        对应MCP的 tools/list 方法。
-        """
         tools = []
         for tool in self._tools.values():
             if category and tool.category != category:
                 continue
-            tools.append({
-                "name": tool.name,
-                "description": tool.description,
-                "inputSchema": tool.input_schema,
-                "category": tool.category,
-            })
+            tools.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.input_schema,
+                    "category": tool.category,
+                }
+            )
         return tools
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolCallResult:
-        """
-        工具调用：执行指定工具。
-        对应MCP的 tools/call 方法。
-        """
         import time
 
         tool = self._tools.get(name)
@@ -117,31 +95,24 @@ class MCPToolServer:
         start = time.time()
         try:
             output = await tool.handler(**arguments)
-            duration_ms = (time.time() - start) * 1000
-
             result = ToolCallResult(
                 tool_name=name,
                 success=True,
                 result=output,
-                duration_ms=duration_ms,
+                duration_ms=(time.time() - start) * 1000,
             )
-        except Exception as e:
-            duration_ms = (time.time() - start) * 1000
+        except Exception as exc:
             result = ToolCallResult(
                 tool_name=name,
                 success=False,
-                error=str(e),
-                duration_ms=duration_ms,
+                error=str(exc),
+                duration_ms=(time.time() - start) * 1000,
             )
 
         self._call_log.append(result)
         return result
 
     async def handle_jsonrpc(self, request: dict) -> dict:
-        """
-        处理JSON-RPC 2.0请求。
-        MCP协议传输层实现。
-        """
         method = request.get("method", "")
         params = request.get("params", {})
         req_id = request.get("id", 1)
@@ -150,9 +121,10 @@ class MCPToolServer:
             if method == "tools/list":
                 result = self.list_tools(category=params.get("category"))
             elif method == "tools/call":
-                tool_name = params.get("name", "")
-                arguments = params.get("arguments", {})
-                call_result = await self.call_tool(tool_name, arguments)
+                call_result = await self.call_tool(
+                    params.get("name", ""),
+                    params.get("arguments", {}),
+                )
                 result = {
                     "success": call_result.success,
                     "result": call_result.result,
@@ -168,55 +140,53 @@ class MCPToolServer:
                 }
 
             return {"jsonrpc": "2.0", "result": result, "id": req_id}
-
-        except Exception as e:
+        except Exception as exc:
             return {
                 "jsonrpc": "2.0",
-                "error": {"code": -32603, "message": str(e)},
+                "error": {"code": -32603, "message": str(exc)},
                 "id": req_id,
             }
 
     def get_call_log(self, last_n: int = 100) -> list[dict]:
-        """获取最近的工具调用日志"""
         return [
             {
-                "tool": r.tool_name,
-                "success": r.success,
-                "duration_ms": r.duration_ms,
-                "timestamp": r.timestamp,
-                "error": r.error,
+                "tool": item.tool_name,
+                "success": item.success,
+                "duration_ms": item.duration_ms,
+                "timestamp": item.timestamp,
+                "error": item.error,
             }
-            for r in self._call_log[-last_n:]
+            for item in self._call_log[-last_n:]
         ]
 
 
 def create_default_tools(server: MCPToolServer) -> MCPToolServer:
-    """注册默认的MCP工具集"""
+    """注册默认校园工具。"""
 
     @server.register(
-        name="order_query",
-        description="查询订单信息，支持按订单号或用户ID查询",
+        name="campus_card_query",
+        description="查询校园卡状态、余额或挂失状态",
         input_schema={
             "type": "object",
             "properties": {
-                "order_id": {"type": "string", "description": "订单号"},
-                "user_id": {"type": "string", "description": "用户ID"},
+                "student_id": {"type": "string", "description": "学号"},
+                "card_no": {"type": "string", "description": "校园卡号"},
             },
         },
-        category="order",
+        category="student_services",
     )
-    async def order_query(order_id: str = "", user_id: str = "") -> dict:
+    async def campus_card_query(student_id: str = "", card_no: str = "") -> dict:
         return {
-            "order_id": order_id or "ORD-20260401-001",
-            "status": "shipped",
-            "amount": 299.00,
-            "product": "智能理财产品A",
-            "created_at": "2026-04-01T10:00:00",
+            "student_id": student_id or "2026001234",
+            "card_no": card_no or "CARD-10001",
+            "status": "active",
+            "balance": 52.5,
+            "loss_reported": False,
         }
 
     @server.register(
         name="knowledge_search",
-        description="搜索企业知识库，返回相关文档片段",
+        description="搜索校内知识库并返回相关文档片段",
         input_schema={
             "type": "object",
             "properties": {
@@ -229,57 +199,70 @@ def create_default_tools(server: MCPToolServer) -> MCPToolServer:
     )
     async def knowledge_search(query: str, top_k: int = 3) -> list[dict]:
         return [
-            {"content": f"关于'{query}'的知识库文档片段", "source": "FAQ.md", "score": 0.95},
-        ]
+            {
+                "content": f"关于“{query}”的校内知识库片段",
+                "source": "campus_faq.md",
+                "score": 0.95,
+            }
+        ][:top_k]
 
     @server.register(
-        name="ticket_create",
-        description="创建客服工单",
+        name="service_ticket_create",
+        description="创建校园服务工单",
         input_schema={
             "type": "object",
             "properties": {
                 "title": {"type": "string"},
                 "description": {"type": "string"},
-                "priority": {"type": "string", "enum": ["low", "medium", "high", "urgent"]},
+                "priority": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "urgent"],
+                },
                 "category": {"type": "string"},
             },
             "required": ["title", "description"],
         },
         category="ticket",
     )
-    async def ticket_create(title: str, description: str, priority: str = "medium", category: str = "general") -> dict:
+    async def service_ticket_create(
+        title: str, description: str, priority: str = "medium", category: str = "general"
+    ) -> dict:
         import uuid
+
         return {
-            "ticket_id": f"TK-{uuid.uuid4().hex[:8].upper()}",
+            "ticket_id": f"CAMP-{uuid.uuid4().hex[:8].upper()}",
             "title": title,
+            "category": category,
             "status": "created",
             "priority": priority,
         }
 
     @server.register(
-        name="risk_check",
-        description="风控接口 — 检查交易/操作的风险等级",
+        name="emergency_check",
+        description="对宿舍安全、紧急求助等场景进行分级判断",
         input_schema={
             "type": "object",
             "properties": {
                 "user_id": {"type": "string"},
-                "action": {"type": "string"},
-                "amount": {"type": "number"},
+                "event": {"type": "string"},
+                "severity_hint": {"type": "string"},
             },
-            "required": ["user_id", "action"],
+            "required": ["user_id", "event"],
         },
-        category="compliance",
+        category="safety",
     )
-    async def risk_check(user_id: str, action: str, amount: float = 0.0) -> dict:
+    async def emergency_check(
+        user_id: str, event: str, severity_hint: str = "normal"
+    ) -> dict:
         risk_level = "low"
-        if amount > 50000:
+        if any(keyword in event for keyword in ("漏电", "受伤", "火情", "打架", "晕倒")):
             risk_level = "high"
-        elif amount > 10000:
-            risk_level = "medium"
+        elif severity_hint in {"medium", "high"}:
+            risk_level = severity_hint
 
         return {
             "user_id": user_id,
-            "action": action,
+            "event": event,
             "risk_level": risk_level,
             "requires_manual_review": risk_level == "high",
         }
